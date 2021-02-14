@@ -175,26 +175,17 @@ impl<'a, 'b> BlockCompiler<'a, 'b> {
 }
 
 impl scratch::Value {
-    fn build(&self, t: Type, c: &mut BlockCompiler) -> Value {
+    fn build(&self, c: &mut BlockCompiler) -> Value {
         match self {
-            scratch::Value::Number(n) => match t {
-                types::F64 => c.f.ins().f64const(*n),
-                _ => c.f.ins().iconst(t, *n as i64),
+            scratch::Value::Number(n) => c.f.ins().f64const(*n),
+            scratch::Value::String(s) => match s.parse::<f64>() {
+                Ok(n) => c.f.ins().f64const(n),
+                Err(_) => c.f.ins().f64const(0.0),
             },
             scratch::Value::Load(id) => {
                 let ptr = c.c.scratch_var_ptr(id, c.f);
-                c.f.ins().load(t, MemFlags::new(), ptr, 0)
+                c.f.ins().load(types::F64, MemFlags::new(), ptr, 0)
             }
-            scratch::Value::String(s) => match t {
-                types::F64 => match s.parse::<f64>() {
-                    Ok(n) => c.f.ins().f64const(n),
-                    Err(_) => c.f.ins().iconst(t, 0),
-                },
-                _ => match s.parse::<i64>() {
-                    Ok(n) => c.f.ins().iconst(t, n),
-                    Err(_) => c.f.ins().iconst(t, 0),
-                },
-            },
         }
     }
 }
@@ -203,9 +194,9 @@ impl scratch::BlockExpression {
     fn build(&self, c: &mut BlockCompiler) -> Value {
         match self {
             scratch::BlockExpression::OperatorEquals { left, right } => {
-                let a1 = left.build(types::I32, c);
-                let a2 = right.build(types::I32, c);
-                c.f.ins().icmp(IntCC::Equal, a1, a2)
+                let a1 = left.build(c);
+                let a2 = right.build(c);
+                c.f.ins().fcmp(FloatCC::Equal, a1, a2)
             }
         }
     }
@@ -260,7 +251,8 @@ impl scratch::Block {
             scratch::BlockOp::ControlWait(delay) => {
                 let libc_sleep = c.import_func("sleep", &[types::I32], None);
 
-                let tmp = delay.build(types::I32, c);
+                let tmp = delay.build(c);
+                let tmp = c.f.ins().fcvt_to_uint(types::I32, tmp);
                 c.f.ins().call(libc_sleep, &[tmp]);
             }
             scratch::BlockOp::ControlIfElse {
@@ -321,14 +313,14 @@ impl scratch::Block {
             scratch::BlockOp::EventWhenFlagClicked => {}
             scratch::BlockOp::DataSetVariableTo { id, value } => {
                 let ptr = c.c.scratch_var_ptr(id, c.f);
-                let val = value.build(types::I32, c);
+                let val = value.build(c);
                 c.f.ins().store(MemFlags::new(), val, ptr, 0);
             }
             scratch::BlockOp::DataChangeVariableBy { id, value } => {
                 let ptr = c.c.scratch_var_ptr(id, c.f);
-                let val = c.f.ins().load(types::I32, MemFlags::new(), ptr, 0);
-                let dif = value.build(types::I32, c);
-                let val = c.f.ins().iadd(val, dif);
+                let val = c.f.ins().load(types::F64, MemFlags::new(), ptr, 0);
+                let dif = value.build(c);
+                let val = c.f.ins().fadd(val, dif);
                 c.f.ins().store(MemFlags::new(), val, ptr, 0);
             }
         }
