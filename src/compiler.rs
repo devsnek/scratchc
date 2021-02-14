@@ -274,11 +274,10 @@ impl scratch::Block {
                 c.ends.pop();
             }
             scratch::BlockOp::ControlWait(delay) => {
-                let libc_sleep = c.import_func("sleep", &[types::I32], None);
+                let sleep = c.import_func("support_sleep", &[types::F64], None);
 
                 let tmp = delay.build(c);
-                let tmp = c.f.ins().fcvt_to_uint(types::I32, tmp);
-                c.f.ins().call(libc_sleep, &[tmp]);
+                c.f.ins().call(sleep, &[tmp]);
             }
             scratch::BlockOp::ControlIfElse {
                 condition,
@@ -313,7 +312,7 @@ impl scratch::Block {
             }
             scratch::BlockOp::ControlStopAll => {
                 let libc_exit = c.import_func("exit", &[types::I32], None);
-                let detach_scripts = c.import_func("detach_scripts", &[], None);
+                let detach_scripts = c.import_func("support_detach_scripts", &[], None);
 
                 c.f.ins().call(detach_scripts, &[]);
 
@@ -344,7 +343,7 @@ impl scratch::Block {
                         c.f.ins().call(libc_write, &[fd, ptr, len]);
                     }
                     _ => {
-                        let write_float = c.import_func("write_float", &[types::F64], None);
+                        let write_float = c.import_func("support_write_float", &[types::F64], None);
                         let tmp = s.build(c);
                         c.f.ins().call(write_float, &[tmp]);
                     }
@@ -451,8 +450,8 @@ pub fn compile(
         let block = f.create_block();
         f.switch_to_block(block);
 
-        let extern_spawn_script = compiler.import_func(
-            "spawn_script",
+        let spawn_script = compiler.import_func(
+            "support_spawn_script",
             &[compiler.module.target_config().pointer_type()],
             None,
             f,
@@ -463,11 +462,11 @@ pub fn compile(
             let tmp = f
                 .ins()
                 .func_addr(compiler.module.target_config().pointer_type(), tmp);
-            f.ins().call(extern_spawn_script, &[tmp]);
+            f.ins().call(spawn_script, &[tmp]);
         }
 
-        let extern_join_scripts = compiler.import_func("join_scripts", &[], None, f);
-        f.ins().call(extern_join_scripts, &[]);
+        let join_scripts = compiler.import_func("support_join_scripts", &[], None, f);
+        f.ins().call(join_scripts, &[]);
 
         f.ins().return_(&[]);
     });
