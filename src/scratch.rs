@@ -45,14 +45,13 @@ pub struct BlockInfo {
 }
 
 #[derive(serde::Deserialize, Debug)]
-struct ArgumentNames(#[serde(with = "serde_with::json::nested")] Vec<String>);
+struct NestedArguments(#[serde(with = "serde_with::json::nested")] Vec<String>);
 
 #[derive(serde::Deserialize, Debug)]
 pub struct MutationInfo {
-    argumentnames: Option<ArgumentNames>,
-    #[serde(with = "serde_with::json::nested")]
-    argumentids: Vec<String>,
-    proccode: String,
+    argumentnames: Option<NestedArguments>,
+    argumentids: Option<NestedArguments>,
+    proccode: Option<String>,
 }
 
 #[derive(Debug)]
@@ -77,7 +76,7 @@ impl Target {
                     ..
                 } = prototype.mutation.as_ref().unwrap();
                 procedures.push(Procedure {
-                    id: proccode.to_owned(),
+                    id: proccode.clone().unwrap(),
                     arguments: argumentnames.as_ref().unwrap().0.clone(),
                     body,
                 });
@@ -138,7 +137,7 @@ pub enum BlockOp {
     ControlIfElse {
         condition: Value,
         consequent: Box<Block>,
-        alternative: Box<Block>,
+        alternative: Option<Box<Block>>,
     },
     ControlStopAll,
     ControlStopScript,
@@ -184,10 +183,18 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
                 &blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()],
                 blocks,
             )),
-            alternative: Box::new(build_block(
+            alternative: Some(Box::new(build_block(
                 &blocks[b.inputs["SUBSTACK2"][1].as_str().unwrap()],
                 blocks,
+            ))),
+        },
+        "control_if" => BlockOp::ControlIfElse {
+            condition: Value::hydrate(&b.inputs["CONDITION"], blocks),
+            consequent: Box::new(build_block(
+                &blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()],
+                blocks,
             )),
+            alternative: None,
         },
         "control_stop" => match b.fields["STOP_OPTION"][0].as_str().unwrap() {
             "all" => BlockOp::ControlStopAll,
@@ -218,12 +225,15 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
             value: Value::hydrate(&b.inputs["VALUE"], blocks),
         },
         "procedures_call" => BlockOp::ProceduresCall {
-            proc: b.mutation.as_ref().unwrap().proccode.clone(),
+            proc: b.mutation.as_ref().unwrap().proccode.clone().unwrap(),
             args: b
                 .mutation
                 .as_ref()
                 .unwrap()
                 .argumentids
+                .as_ref()
+                .unwrap()
+                .0
                 .iter()
                 .map(|id| Value::hydrate(&b.inputs[id], blocks))
                 .collect(),

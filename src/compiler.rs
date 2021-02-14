@@ -3,35 +3,17 @@ use cranelift::prelude::*;
 use cranelift_module::Module;
 use std::collections::HashMap;
 
-struct Compiler {
-    flags: settings::Flags,
-    module: cranelift_object::ObjectModule,
+struct Compiler<M: Module> {
+    module: M,
     data_id_counter: usize,
     var_id_counter: usize,
     scratch_vars: HashMap<String, cranelift_module::DataId>,
     procedures: HashMap<String, cranelift_module::FuncId>,
 }
 
-impl Compiler {
-    fn new() -> Compiler {
-        let mut flag_builder = settings::builder();
-        flag_builder.set("is_pic", "true").unwrap();
-        flag_builder.set("opt_level", "speed_and_size").unwrap();
-        let flags = settings::Flags::new(flag_builder);
-
-        let isa = cranelift_native::builder().unwrap().finish(flags.clone());
-
-        let module = cranelift_object::ObjectModule::new(
-            cranelift_object::ObjectBuilder::new(
-                isa,
-                "",
-                cranelift_module::default_libcall_names(),
-            )
-            .unwrap(),
-        );
-
+impl<M: Module> Compiler<M> {
+    fn new(module: M) -> Compiler<M> {
         Compiler {
-            flags,
             module,
             data_id_counter: 0,
             var_id_counter: 0,
@@ -49,7 +31,7 @@ impl Compiler {
         builder: F,
     ) -> cranelift_module::FuncId
     where
-        F: Fn(&mut Compiler, &mut FunctionBuilder, cranelift_module::FuncId),
+        F: Fn(&mut Compiler<M>, &mut FunctionBuilder, cranelift_module::FuncId),
     {
         let mut sig = self.module.make_signature();
         for param in params {
@@ -86,7 +68,8 @@ impl Compiler {
         f.seal_all_blocks();
         f.finalize();
 
-        cranelift::codegen::verifier::verify_function(&ctx.func, &self.flags).unwrap();
+        cranelift::codegen::verifier::verify_function(&ctx.func, self.module.isa().flags())
+            .unwrap();
 
         // println!("{}", ctx.func.display(None));
 
@@ -177,14 +160,14 @@ impl Compiler {
     }
 }
 
-struct BlockCompiler<'a, 'b> {
-    c: &'b mut Compiler,
+struct BlockCompiler<'a, 'b, M: Module> {
+    c: &'b mut Compiler<M>,
     f: &'b mut FunctionBuilder<'a>,
     ends: Vec<Block>,
     args: HashMap<String, Variable>,
 }
 
-impl<'a, 'b> BlockCompiler<'a, 'b> {
+impl<'a, 'b, M: Module> BlockCompiler<'a, 'b, M> {
     fn fall_off_end(&mut self) {
         match self.ends.last() {
             Some(b) => self.f.ins().jump(*b, &[]),
@@ -203,7 +186,7 @@ impl<'a, 'b> BlockCompiler<'a, 'b> {
 }
 
 impl scratch::Value {
-    fn build(&self, c: &mut BlockCompiler) -> Value {
+    fn build(&self, c: &mut BlockCompiler<impl Module>) -> Value {
         match self {
             scratch::Value::Number(n) => c.f.ins().f64const(*n),
             scratch::Value::String(s) => match s.parse::<f64>() {
@@ -242,7 +225,7 @@ impl scratch::Value {
 }
 
 impl scratch::Block {
-    fn build(&self, c: &mut BlockCompiler, block: Block) {
+    fn build(&self, c: &mut BlockCompiler<impl Module>, block: Block) {
         c.f.switch_to_block(block);
 
         match &self.op {
@@ -307,12 +290,18 @@ impl scratch::Block {
                 let bnext = c.f.create_block();
 
                 let tmp = condition.build(c);
-                c.f.ins().brz(tmp, balt, &[]);
+                if alternative.is_some() {
+                    c.f.ins().brz(tmp, balt, &[]);
+                } else {
+                    c.f.ins().brz(tmp, bnext, &[]);
+                }
                 c.f.ins().jump(bcons, &[]);
 
                 c.ends.push(bnext);
                 consequent.build(c, bcons);
-                alternative.build(c, balt);
+                if let Some(alternative) = alternative {
+                    alternative.build(c, balt);
+                }
                 c.ends.pop();
 
                 if let Some(next) = &self.next {
@@ -397,11 +386,12 @@ impl scratch::Block {
 }
 
 pub fn compile(
+    m: &mut impl Module,
     variables: &[String],
     procedures: &[scratch::Procedure],
     scripts: &[scratch::Block],
-) -> Vec<u8> {
-    let mut compiler = Compiler::new();
+) {
+    let mut compiler = Compiler::new(m);
 
     let mut script_funcs = vec![];
 
@@ -481,6 +471,4 @@ pub fn compile(
 
         f.ins().return_(&[]);
     });
-
-    compiler.module.finish().emit().unwrap()
 }

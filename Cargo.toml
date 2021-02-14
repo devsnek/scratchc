@@ -14,3 +14,7 @@ cranelift-object = "0.69"
 cranelift-module = "0.69"
 cranelift-preopt = "0.69"
 cranelift-native = "0.69"
+
+[dev-dependencies]
+test-generator = "0.3.0"
+pretty_assertions = "0.6"
