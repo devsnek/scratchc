@@ -8,6 +8,7 @@ fn main() {
     let project = scratch::ProjectInfo::new(file).unwrap();
 
     let mut variables = vec![];
+    let mut procedures = vec![];
     let mut scripts = vec![];
 
     for target in project.targets {
@@ -16,12 +17,16 @@ fn main() {
             variables.push(var.clone());
         }
 
+        for proc in target.procedures {
+            procedures.push(proc);
+        }
+
         for script in target.scripts {
             scripts.push(script);
         }
     }
 
-    let o = compiler::compile(&variables, &scripts);
+    let o = compiler::compile(&variables, &procedures, &scripts);
 
     // FIXME: this is terrible
     std::fs::write("./out.o", o).unwrap();

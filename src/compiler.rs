@@ -9,6 +9,7 @@ struct Compiler {
     data_id_counter: usize,
     var_id_counter: usize,
     scratch_vars: HashMap<String, cranelift_module::DataId>,
+    procedures: HashMap<String, cranelift_module::FuncId>,
 }
 
 impl Compiler {
@@ -35,6 +36,7 @@ impl Compiler {
             data_id_counter: 0,
             var_id_counter: 0,
             scratch_vars: HashMap::new(),
+            procedures: HashMap::new(),
         }
     }
 
@@ -47,7 +49,7 @@ impl Compiler {
         builder: F,
     ) -> cranelift_module::FuncId
     where
-        F: Fn(&mut Compiler, &mut FunctionBuilder),
+        F: Fn(&mut Compiler, &mut FunctionBuilder, cranelift_module::FuncId),
     {
         let mut sig = self.module.make_signature();
         for param in params {
@@ -72,17 +74,21 @@ impl Compiler {
 
         let mut ctx = self.module.make_context();
         let mut fn_builder_ctx = FunctionBuilderContext::new();
-        ctx.func =
-            cranelift::codegen::ir::Function::with_name_signature(ExternalName::user(0, 0), sig);
+        ctx.func = cranelift::codegen::ir::Function::with_name_signature(
+            ExternalName::testcase(name),
+            sig,
+        );
 
         let mut f = FunctionBuilder::new(&mut ctx.func, &mut fn_builder_ctx);
 
-        builder(self, &mut f);
+        builder(self, &mut f, func_id);
 
         f.seal_all_blocks();
         f.finalize();
 
         cranelift::codegen::verifier::verify_function(&ctx.func, &self.flags).unwrap();
+
+        // println!("{}", ctx.func.display(None));
 
         self.module
             .define_function(
@@ -142,11 +148,32 @@ impl Compiler {
         self.module.declare_func_in_func(func, f.func)
     }
 
+    fn create_scratch_var(&mut self, name: &str) {
+        let data_id = self
+            .module
+            .declare_data(name, cranelift_module::Linkage::Local, true, false)
+            .unwrap();
+        let mut ctx = cranelift_module::DataContext::new();
+        ctx.define(Box::new([0; std::mem::size_of::<f64>()]));
+        self.module.define_data(data_id, &ctx).unwrap();
+        self.scratch_vars.insert(name.to_owned(), data_id);
+    }
+
     fn scratch_var_ptr(&mut self, name: &str, f: &mut FunctionBuilder) -> Value {
         let data_id = self.scratch_vars[name];
         let data_ref = self.module.declare_data_in_func(data_id, f.func);
         f.ins()
             .global_value(self.module.target_config().pointer_type(), data_ref)
+    }
+
+    fn load_scratch_var(&mut self, name: &str, f: &mut FunctionBuilder) -> Value {
+        let ptr = self.scratch_var_ptr(name, f);
+        f.ins().load(types::F64, MemFlags::new(), ptr, 0)
+    }
+
+    fn store_scratch_var(&mut self, name: &str, val: Value, f: &mut FunctionBuilder) {
+        let ptr = self.scratch_var_ptr(name, f);
+        f.ins().store(MemFlags::new(), val, ptr, 0);
     }
 }
 
@@ -154,6 +181,7 @@ struct BlockCompiler<'a, 'b> {
     c: &'b mut Compiler,
     f: &'b mut FunctionBuilder<'a>,
     ends: Vec<Block>,
+    args: HashMap<String, Variable>,
 }
 
 impl<'a, 'b> BlockCompiler<'a, 'b> {
@@ -182,10 +210,7 @@ impl scratch::Value {
                 Ok(n) => c.f.ins().f64const(n),
                 Err(_) => c.f.ins().f64const(0.0),
             },
-            scratch::Value::Load(id) => {
-                let ptr = c.c.scratch_var_ptr(id, c.f);
-                c.f.ins().load(types::F64, MemFlags::new(), ptr, 0)
-            }
+            scratch::Value::Load(id) => c.c.load_scratch_var(id, c.f),
             scratch::Value::Expression(b) => match &**b {
                 scratch::BlockExpression::OperatorEquals { left, right } => {
                     let a1 = left.build(c);
@@ -201,6 +226,15 @@ impl scratch::Value {
                     let a1 = left.build(c);
                     let a2 = right.build(c);
                     c.f.ins().fadd(a1, a2)
+                }
+                scratch::BlockExpression::OperatorSubtract { left, right } => {
+                    let a1 = left.build(c);
+                    let a2 = right.build(c);
+                    c.f.ins().fsub(a1, a2)
+                }
+                scratch::BlockExpression::ArgumentReporterStringNumber { name } => {
+                    let var = c.args[name];
+                    c.f.use_var(var)
                 }
             },
         }
@@ -329,19 +363,25 @@ impl scratch::Block {
             }
             scratch::BlockOp::EventWhenFlagClicked => {}
             scratch::BlockOp::DataSetVariableTo { id, value } => {
-                let ptr = c.c.scratch_var_ptr(id, c.f);
                 let val = value.build(c);
-                c.f.ins().store(MemFlags::new(), val, ptr, 0);
+                c.c.store_scratch_var(id, val, c.f);
             }
             scratch::BlockOp::DataChangeVariableBy { id, value } => {
-                let ptr = c.c.scratch_var_ptr(id, c.f);
-                let val = c.f.ins().load(types::F64, MemFlags::new(), ptr, 0);
+                let val = c.c.load_scratch_var(id, c.f);
                 let dif = value.build(c);
                 let val = c.f.ins().fadd(val, dif);
-                c.f.ins().store(MemFlags::new(), val, ptr, 0);
+                c.c.store_scratch_var(id, val, c.f);
             }
-            scratch::BlockOp::ProceduresCall { .. } => {}
-            scratch::BlockOp::ProceduresDefinition { .. } => {}
+            scratch::BlockOp::ProceduresCall { proc, args } => {
+                let mut arguments = vec![];
+                for (_, v) in args {
+                    arguments.push(v.build(c));
+                }
+                let tmp =
+                    c.c.module
+                        .declare_func_in_func(c.c.procedures[proc], c.f.func);
+                c.f.ins().call(tmp, &arguments);
+            }
         }
 
         if !c.f.is_filled() {
@@ -356,37 +396,68 @@ impl scratch::Block {
     }
 }
 
-pub fn compile(variables: &[String], scripts: &[scratch::Block]) -> Vec<u8> {
+pub fn compile(
+    variables: &[String],
+    procedures: &[scratch::Procedure],
+    scripts: &[scratch::Block],
+) -> Vec<u8> {
     let mut compiler = Compiler::new();
 
     let mut script_funcs = vec![];
 
     for var in variables {
-        let data_id = compiler
-            .module
-            .declare_data(var, cranelift_module::Linkage::Local, true, false)
-            .unwrap();
-        let mut ctx = cranelift_module::DataContext::new();
-        ctx.define(Box::new([0; std::mem::size_of::<f64>()]));
-        compiler.module.define_data(data_id, &ctx).unwrap();
-        compiler.scratch_vars.insert(var.to_owned(), data_id);
+        compiler.create_scratch_var(var);
+    }
+
+    for proc in procedures {
+        compiler.compile_func(
+            &format!("proc_{}", proc.id),
+            &vec![types::F64; proc.arguments.len()],
+            None,
+            false,
+            |c, f, func_id| {
+                c.procedures.insert(proc.id.clone(), func_id); // insert here to support recursion
+
+                let block = f.create_block();
+                f.append_block_params_for_function_params(block);
+                f.switch_to_block(block);
+                let mut args = HashMap::new();
+                for (i, (name, _)) in proc.arguments.iter().enumerate() {
+                    let var = c.new_var();
+                    f.declare_var(var, types::F64);
+                    let val = f.block_params(block)[i];
+                    f.def_var(var, val);
+                    args.insert(name.to_owned(), var);
+                }
+
+                let mut bc = BlockCompiler {
+                    c,
+                    f,
+                    ends: Vec::new(),
+                    args,
+                };
+                proc.body.build(&mut bc, block);
+            },
+        );
     }
 
     for (i, script) in scripts.iter().enumerate() {
-        let func_id = compiler.compile_func(&format!("script_{}", i), &[], None, false, |c, f| {
-            let mut bc = BlockCompiler {
-                c,
-                f,
-                ends: Vec::new(),
-            };
-            let block = bc.f.create_block();
-            script.build(&mut bc, block);
-        });
+        let func_id =
+            compiler.compile_func(&format!("script_{}", i), &[], None, false, |c, f, _| {
+                let mut bc = BlockCompiler {
+                    c,
+                    f,
+                    ends: Vec::new(),
+                    args: HashMap::new(),
+                };
+                let block = bc.f.create_block();
+                script.build(&mut bc, block);
+            });
 
         script_funcs.push(func_id);
     }
 
-    compiler.compile_func("main", &[], None, true, |compiler, f| {
+    compiler.compile_func("main", &[], None, true, |compiler, f, _| {
         let block = f.create_block();
         f.switch_to_block(block);
 

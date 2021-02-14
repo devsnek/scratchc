@@ -45,7 +45,11 @@ pub struct BlockInfo {
 }
 
 #[derive(serde::Deserialize, Debug)]
+struct ArgumentNames(#[serde(with = "serde_with::json::nested")] Vec<String>);
+
+#[derive(serde::Deserialize, Debug)]
 pub struct MutationInfo {
+    argumentnames: Option<ArgumentNames>,
     #[serde(with = "serde_with::json::nested")]
     argumentids: Vec<String>,
     proccode: String,
@@ -55,7 +59,7 @@ pub struct MutationInfo {
 pub struct Target {
     pub variables: HashMap<String, (String, usize)>,
     pub scripts: Vec<Block>,
-    pub procedures: Vec<Block>,
+    pub procedures: Vec<Procedure>,
 }
 
 impl Target {
@@ -64,7 +68,29 @@ impl Target {
         let mut procedures = vec![];
         for b in i.blocks.values() {
             if b.opcode == "procedures_definition" {
-                procedures.push(build_block(b, &i.blocks));
+                let body = build_block(&i.blocks[b.next.as_ref().unwrap()], &i.blocks);
+
+                let prototype = &i.blocks[b.inputs["custom_block"][1].as_str().unwrap()];
+                if let Some(MutationInfo {
+                    argumentnames,
+                    argumentids,
+                    proccode,
+                }) = &prototype.mutation
+                {
+                    let mut arguments = HashMap::new();
+
+                    for (name, id) in argumentnames.as_ref().unwrap().0.iter().zip(argumentids) {
+                        arguments.insert(name.to_owned(), id.to_owned());
+                    }
+
+                    procedures.push(Procedure {
+                        id: proccode.to_owned(),
+                        arguments,
+                        body,
+                    });
+                } else {
+                    unreachable!();
+                };
             } else if b.top_level {
                 scripts.push(build_block(b, &i.blocks));
             }
@@ -75,6 +101,13 @@ impl Target {
             procedures,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct Procedure {
+    pub id: String,
+    pub arguments: HashMap<String, String>,
+    pub body: Block,
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +126,7 @@ impl Value {
                 4 | 5 | 6 | 7 => Value::Number(v[1][1].as_str().unwrap().parse().unwrap()),
                 10 => Value::String(v[1][1].as_str().unwrap().to_owned()),
                 12 => Value::Load(v[1][2].as_str().unwrap().to_owned()),
-                _ => panic!("{:?}", v),
+                _ => panic!("{:#?}", v),
             }
         } else {
             Value::Expression(Box::new(build_block_expr(
@@ -132,9 +165,6 @@ pub enum BlockOp {
     ProceduresCall {
         proc: String,
         args: Vec<(String, Value)>,
-    },
-    ProceduresDefinition {
-        body: Box<Block>,
     },
 }
 
@@ -208,13 +238,7 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
                 .map(|id| (id.clone(), Value::hydrate(&b.inputs[id], blocks)))
                 .collect(),
         },
-        "procedures_definition" => BlockOp::ProceduresDefinition {
-            body: Box::new(build_block(
-                &blocks[b.inputs["custom_block"][1].as_str().unwrap()],
-                blocks,
-            )),
-        },
-        _ => panic!("{:?}", b),
+        _ => panic!("{:#?}", b),
     };
     Block {
         op,
@@ -231,6 +255,8 @@ pub enum BlockExpression {
     OperatorEquals { left: Value, right: Value },
     OperatorGT { left: Value, right: Value },
     OperatorAdd { left: Value, right: Value },
+    OperatorSubtract { left: Value, right: Value },
+    ArgumentReporterStringNumber { name: String },
 }
 
 fn build_block_expr(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> BlockExpression {
@@ -247,7 +273,13 @@ fn build_block_expr(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block
             left: Value::hydrate(&b.inputs["NUM1"], blocks),
             right: Value::hydrate(&b.inputs["NUM2"], blocks),
         },
-        // "argument_reporter_string_number" => BlockExpression::A {},
-        _ => panic!("{:?}", b),
+        "operator_subtract" => BlockExpression::OperatorSubtract {
+            left: Value::hydrate(&b.inputs["NUM1"], blocks),
+            right: Value::hydrate(&b.inputs["NUM2"], blocks),
+        },
+        "argument_reporter_string_number" => BlockExpression::ArgumentReporterStringNumber {
+            name: b.fields["VALUE"][0].as_str().unwrap().to_owned(),
+        },
+        _ => panic!("{:#?}", b),
     }
 }
