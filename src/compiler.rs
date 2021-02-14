@@ -141,6 +141,13 @@ impl Compiler {
             .unwrap();
         self.module.declare_func_in_func(func, f.func)
     }
+
+    fn scratch_var_ptr(&mut self, name: &str, f: &mut FunctionBuilder) -> Value {
+        let data_id = self.scratch_vars[name];
+        let data_ref = self.module.declare_data_in_func(data_id, f.func);
+        f.ins()
+            .global_value(self.module.target_config().pointer_type(), data_ref)
+    }
 }
 
 struct BlockCompiler<'a, 'b> {
@@ -168,24 +175,26 @@ impl<'a, 'b> BlockCompiler<'a, 'b> {
 }
 
 impl scratch::Value {
-    fn build(&self, c: &mut BlockCompiler, t: Type) -> Value {
+    fn build(&self, t: Type, c: &mut BlockCompiler) -> Value {
         match self {
             scratch::Value::Number(n) => match t {
                 types::F64 => c.f.ins().f64const(*n),
                 _ => c.f.ins().iconst(t, *n as i64),
             },
             scratch::Value::Load(id) => {
-                let data_id = c.c.scratch_vars[id];
-                let tmp = c.c.module.declare_data_in_func(data_id, &mut c.f.func);
-                let tmp = c.f.ins().global_value(types::I64, tmp);
-                match t {
-                    types::I64 => tmp,
-                    types::I32 => c.f.ins().ireduce(t, tmp),
-                    types::F64 => c.f.ins().bitcast(t, tmp),
-                    _ => panic!(),
-                }
+                let ptr = c.c.scratch_var_ptr(id, c.f);
+                c.f.ins().load(t, MemFlags::new(), ptr, 0)
             }
-            _ => c.f.ins().iconst(t, 0),
+            scratch::Value::String(s) => match t {
+                types::F64 => match s.parse::<f64>() {
+                    Ok(n) => c.f.ins().f64const(n),
+                    Err(_) => c.f.ins().iconst(t, 0),
+                },
+                _ => match s.parse::<i64>() {
+                    Ok(n) => c.f.ins().iconst(t, n),
+                    Err(_) => c.f.ins().iconst(t, 0),
+                },
+            },
         }
     }
 }
@@ -194,8 +203,8 @@ impl scratch::BlockExpression {
     fn build(&self, c: &mut BlockCompiler) -> Value {
         match self {
             scratch::BlockExpression::OperatorEquals { left, right } => {
-                let a1 = left.build(c, types::I32);
-                let a2 = right.build(c, types::I32);
+                let a1 = left.build(types::I32, c);
+                let a2 = right.build(types::I32, c);
                 c.f.ins().icmp(IntCC::Equal, a1, a2)
             }
         }
@@ -251,7 +260,7 @@ impl scratch::Block {
             scratch::BlockOp::ControlWait(delay) => {
                 let libc_sleep = c.import_func("sleep", &[types::I32], None);
 
-                let tmp = delay.build(c, types::I32);
+                let tmp = delay.build(types::I32, c);
                 c.f.ins().call(libc_sleep, &[tmp]);
             }
             scratch::BlockOp::ControlIfElse {
@@ -310,9 +319,18 @@ impl scratch::Block {
                 c.f.ins().call(libc_write, &[fd, ptr, len]);
             }
             scratch::BlockOp::EventWhenFlagClicked => {}
-            // TODO: implement setting vars
-            scratch::BlockOp::DataSetVariableTo { .. } => {}
-            scratch::BlockOp::DataChangeVariableBy { .. } => {}
+            scratch::BlockOp::DataSetVariableTo { id, value } => {
+                let ptr = c.c.scratch_var_ptr(id, c.f);
+                let val = value.build(types::I32, c);
+                c.f.ins().store(MemFlags::new(), val, ptr, 0);
+            }
+            scratch::BlockOp::DataChangeVariableBy { id, value } => {
+                let ptr = c.c.scratch_var_ptr(id, c.f);
+                let val = c.f.ins().load(types::I32, MemFlags::new(), ptr, 0);
+                let dif = value.build(types::I32, c);
+                let val = c.f.ins().iadd(val, dif);
+                c.f.ins().store(MemFlags::new(), val, ptr, 0);
+            }
         }
 
         if !c.f.is_filled() {
@@ -338,7 +356,7 @@ pub fn compile(variables: &[String], scripts: &[scratch::Block]) -> Vec<u8> {
             .declare_data(var, cranelift_module::Linkage::Local, true, false)
             .unwrap();
         let mut ctx = cranelift_module::DataContext::new();
-        ctx.define(Box::new([0, 0]));
+        ctx.define(Box::new([0, 0, 0, 0]));
         compiler.module.define_data(data_id, &ctx).unwrap();
         compiler.scratch_vars.insert(var.to_owned(), data_id);
     }

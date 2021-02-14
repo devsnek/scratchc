@@ -149,7 +149,10 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
                 blocks,
             )),
         },
-        "control_forever" => BlockOp::ControlForever(Box::new(build_block(&blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()], blocks))),
+        "control_forever" => BlockOp::ControlForever(Box::new(build_block(
+            &blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()],
+            blocks,
+        ))),
         "control_wait" => BlockOp::ControlWait(Value::hydrate(&b.inputs["DURATION"])),
         "control_if_else" => BlockOp::ControlIfElse {
             condition: build_block_expr(
