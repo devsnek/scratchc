@@ -71,26 +71,16 @@ impl Target {
                 let body = build_block(&i.blocks[b.next.as_ref().unwrap()], &i.blocks);
 
                 let prototype = &i.blocks[b.inputs["custom_block"][1].as_str().unwrap()];
-                if let Some(MutationInfo {
+                let MutationInfo {
                     argumentnames,
-                    argumentids,
                     proccode,
-                }) = &prototype.mutation
-                {
-                    let mut arguments = HashMap::new();
-
-                    for (name, id) in argumentnames.as_ref().unwrap().0.iter().zip(argumentids) {
-                        arguments.insert(name.to_owned(), id.to_owned());
-                    }
-
-                    procedures.push(Procedure {
-                        id: proccode.to_owned(),
-                        arguments,
-                        body,
-                    });
-                } else {
-                    unreachable!();
-                };
+                    ..
+                } = prototype.mutation.as_ref().unwrap();
+                procedures.push(Procedure {
+                    id: proccode.to_owned(),
+                    arguments: argumentnames.as_ref().unwrap().0.clone(),
+                    body,
+                });
             } else if b.top_level {
                 scripts.push(build_block(b, &i.blocks));
             }
@@ -106,7 +96,7 @@ impl Target {
 #[derive(Debug)]
 pub struct Procedure {
     pub id: String,
-    pub arguments: HashMap<String, String>,
+    pub arguments: Vec<String>,
     pub body: Block,
 }
 
@@ -164,7 +154,7 @@ pub enum BlockOp {
     },
     ProceduresCall {
         proc: String,
-        args: Vec<(String, Value)>,
+        args: Vec<Value>,
     },
 }
 
@@ -235,7 +225,7 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
                 .unwrap()
                 .argumentids
                 .iter()
-                .map(|id| (id.clone(), Value::hydrate(&b.inputs[id], blocks)))
+                .map(|id| Value::hydrate(&b.inputs[id], blocks))
                 .collect(),
         },
         _ => panic!("{:#?}", b),

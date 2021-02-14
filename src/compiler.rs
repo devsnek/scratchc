@@ -374,7 +374,7 @@ impl scratch::Block {
             }
             scratch::BlockOp::ProceduresCall { proc, args } => {
                 let mut arguments = vec![];
-                for (_, v) in args {
+                for v in args {
                     arguments.push(v.build(c));
                 }
                 let tmp =
@@ -422,7 +422,7 @@ pub fn compile(
                 f.append_block_params_for_function_params(block);
                 f.switch_to_block(block);
                 let mut args = HashMap::new();
-                for (i, (name, _)) in proc.arguments.iter().enumerate() {
+                for (i, name) in proc.arguments.iter().enumerate() {
                     let var = c.new_var();
                     f.declare_var(var, types::F64);
                     let val = f.block_params(block)[i];

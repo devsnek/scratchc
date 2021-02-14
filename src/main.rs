@@ -35,7 +35,6 @@ fn main() {
     let r = std::process::Command::new("clang++")
         .args(&[
             "-O3",
-            // "-nostartfiles",
             "./out.o",
             "./support.cc",
             "-pthread",
