@@ -8,6 +8,7 @@ edition = "2018"
 zip = "0.5"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_with = { version = "1.6", features = ["json"] }
 cranelift = "0.69"
 cranelift-object = "0.69"
 cranelift-module = "0.69"

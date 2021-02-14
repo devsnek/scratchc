@@ -186,18 +186,23 @@ impl scratch::Value {
                 let ptr = c.c.scratch_var_ptr(id, c.f);
                 c.f.ins().load(types::F64, MemFlags::new(), ptr, 0)
             }
-        }
-    }
-}
-
-impl scratch::BlockExpression {
-    fn build(&self, c: &mut BlockCompiler) -> Value {
-        match self {
-            scratch::BlockExpression::OperatorEquals { left, right } => {
-                let a1 = left.build(c);
-                let a2 = right.build(c);
-                c.f.ins().fcmp(FloatCC::Equal, a1, a2)
-            }
+            scratch::Value::Expression(b) => match &**b {
+                scratch::BlockExpression::OperatorEquals { left, right } => {
+                    let a1 = left.build(c);
+                    let a2 = right.build(c);
+                    c.f.ins().fcmp(FloatCC::Equal, a1, a2)
+                }
+                scratch::BlockExpression::OperatorGT { left, right } => {
+                    let a1 = left.build(c);
+                    let a2 = right.build(c);
+                    c.f.ins().fcmp(FloatCC::GreaterThan, a1, a2)
+                }
+                scratch::BlockExpression::OperatorAdd { left, right } => {
+                    let a1 = left.build(c);
+                    let a2 = right.build(c);
+                    c.f.ins().fadd(a1, a2)
+                }
+            },
         }
     }
 }
@@ -216,7 +221,10 @@ impl scratch::Block {
                 {
                     c.f.declare_var(vtimes, types::I32);
 
-                    let tmp = c.f.ins().iconst(types::I32, times.as_number() as i64 + 1);
+                    let tmp = times.build(c);
+                    let tmp = c.f.ins().fcvt_to_uint(types::I32, tmp);
+                    let one = c.f.ins().iconst(types::I32, 1);
+                    let tmp = c.f.ins().iadd(tmp, one);
                     c.f.def_var(vtimes, tmp);
 
                     c.f.ins().jump(head, &[]);
@@ -295,20 +303,29 @@ impl scratch::Block {
                 c.f.ins().return_(&[]);
             }
             scratch::BlockOp::LooksSay(s) => {
-                let s = format!("{}\n", s.as_str());
-
                 let p = c.c.module.target_config().pointer_type();
-                let libc_write = c.import_func("write", &[types::I32, p, p], Some(p));
+                match s {
+                    scratch::Value::String(s) => {
+                        let libc_write = c.import_func("write", &[types::I32, p, p], Some(p));
 
-                let fd = c.f.ins().iconst(types::I32, 1);
+                        let fd = c.f.ins().iconst(types::I32, 1);
 
-                let data = c.c.create_data(s.as_bytes().into());
-                let tmp = c.c.module.declare_data_in_func(data, &mut c.f.func);
-                let ptr = c.f.ins().global_value(p, tmp);
+                        let s = format!("{}\n", s);
 
-                let len = c.f.ins().iconst(p, s.len() as i64);
+                        let data = c.c.create_data(s.as_bytes().into());
+                        let tmp = c.c.module.declare_data_in_func(data, &mut c.f.func);
+                        let ptr = c.f.ins().global_value(p, tmp);
 
-                c.f.ins().call(libc_write, &[fd, ptr, len]);
+                        let len = c.f.ins().iconst(p, s.len() as i64);
+
+                        c.f.ins().call(libc_write, &[fd, ptr, len]);
+                    }
+                    _ => {
+                        let write_float = c.import_func("write_float", &[types::F64], None);
+                        let tmp = s.build(c);
+                        c.f.ins().call(write_float, &[tmp]);
+                    }
+                };
             }
             scratch::BlockOp::EventWhenFlagClicked => {}
             scratch::BlockOp::DataSetVariableTo { id, value } => {
@@ -323,6 +340,8 @@ impl scratch::Block {
                 let val = c.f.ins().fadd(val, dif);
                 c.f.ins().store(MemFlags::new(), val, ptr, 0);
             }
+            scratch::BlockOp::ProceduresCall { .. } => {}
+            scratch::BlockOp::ProceduresDefinition { .. } => {}
         }
 
         if !c.f.is_filled() {
@@ -348,7 +367,7 @@ pub fn compile(variables: &[String], scripts: &[scratch::Block]) -> Vec<u8> {
             .declare_data(var, cranelift_module::Linkage::Local, true, false)
             .unwrap();
         let mut ctx = cranelift_module::DataContext::new();
-        ctx.define(Box::new([0, 0, 0, 0]));
+        ctx.define(Box::new([0; std::mem::size_of::<f64>()]));
         compiler.module.define_data(data_id, &ctx).unwrap();
         compiler.scratch_vars.insert(var.to_owned(), data_id);
     }

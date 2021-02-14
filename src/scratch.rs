@@ -38,28 +38,41 @@ pub struct BlockInfo {
     pub parent: Option<String>,
     pub inputs: HashMap<String, serde_json::Value>,
     pub fields: HashMap<String, serde_json::Value>,
+    pub mutation: Option<MutationInfo>,
     pub shadow: bool,
     #[serde(rename = "topLevel")]
     pub top_level: bool,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct MutationInfo {
+    #[serde(with = "serde_with::json::nested")]
+    argumentids: Vec<String>,
+    proccode: String,
 }
 
 #[derive(Debug)]
 pub struct Target {
     pub variables: HashMap<String, (String, usize)>,
     pub scripts: Vec<Block>,
+    pub procedures: Vec<Block>,
 }
 
 impl Target {
     pub fn hydrate(i: TargetInfo) -> Self {
         let mut scripts = vec![];
+        let mut procedures = vec![];
         for b in i.blocks.values() {
-            if b.top_level {
+            if b.opcode == "procedures_definition" {
+                procedures.push(build_block(b, &i.blocks));
+            } else if b.top_level {
                 scripts.push(build_block(b, &i.blocks));
             }
         }
         Target {
             variables: i.variables,
             scripts,
+            procedures,
         }
     }
 }
@@ -69,40 +82,24 @@ pub enum Value {
     Number(f64),
     String(String),
     Load(String),
+    Expression(Box<BlockExpression>),
 }
 
 impl Value {
-    pub fn hydrate(v: &serde_json::Value) -> Value {
-        let handle = |_is_shadow, v: &serde_json::Value| {
-            let kind = v[0].as_u64().unwrap();
+    pub fn hydrate(v: &serde_json::Value, blocks: &HashMap<String, BlockInfo>) -> Value {
+        if v[1].is_array() {
+            let kind = v[1][0].as_u64().unwrap();
             match kind {
-                4 | 5 | 6 | 7 => Value::Number(v[1].as_str().unwrap().parse().unwrap()),
-                10 => Value::String(v[1].as_str().unwrap().to_owned()),
-                12 => Value::Load(v[2].as_str().unwrap().to_owned()),
+                4 | 5 | 6 | 7 => Value::Number(v[1][1].as_str().unwrap().parse().unwrap()),
+                10 => Value::String(v[1][1].as_str().unwrap().to_owned()),
+                12 => Value::Load(v[1][2].as_str().unwrap().to_owned()),
                 _ => panic!("{:?}", v),
             }
-        };
-        let kind = v[0].as_u64().unwrap();
-        let (block, _shadow) = match kind {
-            1 => (Some(handle(true, &v[1])), None),
-            2 => (Some(handle(false, &v[1])), None),
-            _ => (Some(handle(false, &v[1])), Some(handle(true, &v[2]))),
-        };
-
-        block.unwrap()
-    }
-
-    pub fn as_number(&self) -> f64 {
-        match self {
-            Value::Number(n) => *n,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Value::String(s) => s,
-            _ => unreachable!(),
+        } else {
+            Value::Expression(Box::new(build_block_expr(
+                &blocks[v[1].as_str().unwrap()],
+                blocks,
+            )))
         }
     }
 }
@@ -116,7 +113,7 @@ pub enum BlockOp {
     ControlForever(Box<Block>),
     ControlWait(Value),
     ControlIfElse {
-        condition: BlockExpression,
+        condition: Value,
         consequent: Box<Block>,
         alternative: Box<Block>,
     },
@@ -132,6 +129,13 @@ pub enum BlockOp {
         id: String,
         value: Value,
     },
+    ProceduresCall {
+        proc: String,
+        args: Vec<(String, Value)>,
+    },
+    ProceduresDefinition {
+        body: Box<Block>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +147,7 @@ pub struct Block {
 fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
     let op = match b.opcode.as_str() {
         "control_repeat" => BlockOp::ControlRepeat {
-            times: Value::hydrate(&b.inputs["TIMES"]),
+            times: Value::hydrate(&b.inputs["TIMES"], blocks),
             body: Box::new(build_block(
                 &blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()],
                 blocks,
@@ -153,12 +157,9 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
             &blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()],
             blocks,
         ))),
-        "control_wait" => BlockOp::ControlWait(Value::hydrate(&b.inputs["DURATION"])),
+        "control_wait" => BlockOp::ControlWait(Value::hydrate(&b.inputs["DURATION"], blocks)),
         "control_if_else" => BlockOp::ControlIfElse {
-            condition: build_block_expr(
-                &blocks[b.inputs["CONDITION"][1].as_str().unwrap()],
-                blocks,
-            ),
+            condition: Value::hydrate(&b.inputs["CONDITION"], blocks),
             consequent: Box::new(build_block(
                 &blocks[b.inputs["SUBSTACK"][1].as_str().unwrap()],
                 blocks,
@@ -173,12 +174,12 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
             "this script" => BlockOp::ControlStopScript,
             _ => unreachable!("{:?}", b),
         },
-        "looks_say" => BlockOp::LooksSay(Value::hydrate(&b.inputs["MESSAGE"])),
+        "looks_say" => BlockOp::LooksSay(Value::hydrate(&b.inputs["MESSAGE"], blocks)),
         "looks_sayforsecs" => {
             return Block {
-                op: BlockOp::LooksSay(Value::hydrate(&b.inputs["MESSAGE"])),
+                op: BlockOp::LooksSay(Value::hydrate(&b.inputs["MESSAGE"], blocks)),
                 next: Some(Box::new(Block {
-                    op: BlockOp::ControlWait(Value::hydrate(&b.inputs["SECS"])),
+                    op: BlockOp::ControlWait(Value::hydrate(&b.inputs["SECS"], blocks)),
                     next: if let Some(id) = &b.next {
                         Some(Box::new(build_block(&blocks[id], blocks)))
                     } else {
@@ -190,11 +191,28 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
         "event_whenflagclicked" => BlockOp::EventWhenFlagClicked,
         "data_setvariableto" => BlockOp::DataSetVariableTo {
             id: b.fields["VARIABLE"][1].as_str().unwrap().to_owned(),
-            value: Value::hydrate(&b.inputs["VALUE"]),
+            value: Value::hydrate(&b.inputs["VALUE"], blocks),
         },
         "data_changevariableby" => BlockOp::DataChangeVariableBy {
             id: b.fields["VARIABLE"][1].as_str().unwrap().to_owned(),
-            value: Value::hydrate(&b.inputs["VALUE"]),
+            value: Value::hydrate(&b.inputs["VALUE"], blocks),
+        },
+        "procedures_call" => BlockOp::ProceduresCall {
+            proc: b.mutation.as_ref().unwrap().proccode.clone(),
+            args: b
+                .mutation
+                .as_ref()
+                .unwrap()
+                .argumentids
+                .iter()
+                .map(|id| (id.clone(), Value::hydrate(&b.inputs[id], blocks)))
+                .collect(),
+        },
+        "procedures_definition" => BlockOp::ProceduresDefinition {
+            body: Box::new(build_block(
+                &blocks[b.inputs["custom_block"][1].as_str().unwrap()],
+                blocks,
+            )),
         },
         _ => panic!("{:?}", b),
     };
@@ -211,14 +229,25 @@ fn build_block(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> Block {
 #[derive(Debug, Clone)]
 pub enum BlockExpression {
     OperatorEquals { left: Value, right: Value },
+    OperatorGT { left: Value, right: Value },
+    OperatorAdd { left: Value, right: Value },
 }
 
-fn build_block_expr(b: &BlockInfo, _blocks: &HashMap<String, BlockInfo>) -> BlockExpression {
+fn build_block_expr(b: &BlockInfo, blocks: &HashMap<String, BlockInfo>) -> BlockExpression {
     match b.opcode.as_str() {
         "operator_equals" => BlockExpression::OperatorEquals {
-            left: Value::hydrate(&b.inputs["OPERAND1"]),
-            right: Value::hydrate(&b.inputs["OPERAND2"]),
+            left: Value::hydrate(&b.inputs["OPERAND1"], blocks),
+            right: Value::hydrate(&b.inputs["OPERAND2"], blocks),
         },
+        "operator_gt" => BlockExpression::OperatorGT {
+            left: Value::hydrate(&b.inputs["OPERAND1"], blocks),
+            right: Value::hydrate(&b.inputs["OPERAND2"], blocks),
+        },
+        "operator_add" => BlockExpression::OperatorAdd {
+            left: Value::hydrate(&b.inputs["NUM1"], blocks),
+            right: Value::hydrate(&b.inputs["NUM2"], blocks),
+        },
+        // "argument_reporter_string_number" => BlockExpression::A {},
         _ => panic!("{:?}", b),
     }
 }
