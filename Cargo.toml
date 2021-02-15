@@ -1,5 +1,5 @@
 [package]
-name = "scratch2bin"
+name = "scratchc"
 version = "0.1.0"
 authors = ["snek"]
 edition = "2018"

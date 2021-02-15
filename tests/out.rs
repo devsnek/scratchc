@@ -12,7 +12,7 @@ fn test(test: &str) {
         .unwrap()
         .to_owned();
 
-    scratch2bin::compile_native(file, &tmp);
+    scratchc::compile_native(file, &tmp);
 
     let o = std::process::Command::new(&tmp).output().unwrap();
 

@@ -1,4 +1,4 @@
-# scratch2bin
+# scratchc
 
 Compile [Scratch][] SB3 files to native executables.
 
