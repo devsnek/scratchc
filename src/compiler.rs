@@ -446,7 +446,7 @@ pub fn compile(
         script_funcs.push(func_id);
     }
 
-    compiler.compile_func("main", &[], None, true, |compiler, f, _| {
+    compiler.compile_func("main", &[], Some(types::I32), true, |compiler, f, _| {
         let block = f.create_block();
         f.switch_to_block(block);
 
@@ -468,6 +468,7 @@ pub fn compile(
         let join_scripts = compiler.import_func("support_join_scripts", &[], None, f);
         f.ins().call(join_scripts, &[]);
 
-        f.ins().return_(&[]);
+        let tmp = f.ins().iconst(types::I32, 0);
+        f.ins().return_(&[tmp]);
     });
 }

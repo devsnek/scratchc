@@ -57,17 +57,25 @@ pub fn compile_native(file: impl std::io::Read + std::io::Seek, out_name: &str) 
     // FIXME: this is terrible
     let tmp = std::env::temp_dir();
     std::fs::write(tmp.join("out.o"), o).unwrap();
-    std::fs::write(tmp.join("support.cc"), include_bytes!("./support.cc")).unwrap();
+    std::fs::write(
+        tmp.join("libsupport.a"),
+        include_bytes!(concat!(env!("OUT_DIR"), "/libsupport.a")),
+    )
+    .unwrap();
+
+    let mut args = vec![
+        "-O3".to_owned(),
+        tmp.join("out.o").to_str().unwrap().to_owned(),
+        tmp.join("libsupport.a").to_str().unwrap().to_owned(),
+        "-o".to_owned(),
+        out_name.to_owned(),
+    ];
+    for arg in include!(concat!(env!("OUT_DIR"), "/libsupport_libs.rs")) {
+        args.push(arg.to_string());
+    }
 
     let r = std::process::Command::new("clang++")
-        .args(&[
-            "-O3",
-            tmp.join("out.o").to_str().unwrap(),
-            tmp.join("support.cc").to_str().unwrap(),
-            "-pthread",
-            "-o",
-            &out_name,
-        ])
+        .args(args)
         .output()
         .unwrap();
 
